@@ -5,6 +5,7 @@ from scipy.stats import norm
 import copy
 import sys
 import json
+import math
 
 
 class tree():
@@ -15,9 +16,9 @@ class tree():
         ---
         Inputs:
         """
-        self.read_root = Node('root',mean=0,freq=1)
+        self.root = Node('root',mean=0,freq=1)
+        self.hist_freqs = []
         self._is_fit = False
-        self._is_copied = False
         return 
         
     def add_build(self,build):
@@ -42,7 +43,7 @@ class tree():
         optional_keys = ['name'] #Other optional keys can be specified, but these have a specific behavior
         assert all(key in build.keys() for key in required_keys), 'Dictionary requires buid,freq and time keys'
 
-        last = self.read_root #Begin at the root node and go down
+        last = self.root #Begin at the root node and go down
 
         for index,event in enumerate(build['build']):
             change_flag = 0 
@@ -68,6 +69,8 @@ class tree():
             new.obs.append(build['time'][index])
             new.freq += build['freq']
 
+
+            #add custom keys, whose value is assumed to be a dictionary (used for cluster freq right now)
             for key in list(filter(lambda key: key not in (required_keys + optional_keys),build.keys())):
                 try:
                     attr = getattr(new,key)
@@ -95,9 +98,9 @@ class tree():
         cutoff: Integer. Observation counts at or below the cutoff will use the default rather than calculated standard deviation
         default: Float/Integer. Default standard deviation to be used in cases of few observations.
         """
-        # We dont want to fit if not all builds are in the tree yet
-
-        for node in PreOrderIter(self.read_root):
+        freq_list = []
+        for node in PreOrderIter(self.root):
+            freq_list.append(node.freq)
             try:
                 node.mean = np.mean(node.obs)
                 if len(node.obs) <= cutoff:
@@ -106,64 +109,98 @@ class tree():
                     node.std = np.std(node.obs)
                 del node.obs
             except AttributeError:
-                assert node is self.read_root, "Node other than root is missing observations"
+                assert node is self.root, "Node other than root is missing observations"
+
+        self.hist_freqs = freq_list #allows us to go back to memorized freqs without having to relearn the tree
         self._is_fit = True
         return
         
-    def prepare(self):
+    def reset(self):
         """
-        Makes a copy of the memorized tree to adjust frequencies on
-        TBU: MAKE A MORE EFFICIENT COPIER
+        Resets tree back to hist freqs
         """
-        assert self._is_fit, "Fit model before making the prediction tree"
-        sys.setrecursionlimit(100000)
-        self.write_root = copy.deepcopy(self.read_root)
-        sys.setrecursionlimit(1000)
-        self._is_copied = True
+        assert self._is_fit, "Fit model before resetting tree"
+        for index,node in enumerate(PreOrderIter(self.root)):
+            node.freq = self.hist_freqs[index]
         return  
 
-    def update_tree(self,obs,prune_sd=3):
-        assert self._is_copied, "Tree must be copied before updating"
+    def update_tree(self,obs,prune_sd=5):
+        """
+        Updates tree frequencies for a given observation
+        ---
+        Inputs:
+        obs: Tuple containning observation key and observation time. Observation key is a tuple of unit_type_id and unit type count
+            Time is an integer representing seconds elapsed in the game.
+        prune_sd: Updater will stop looking for a matching key node if the current nodes time is prune_sd sigma above the observation time.
+            Heurisitic so the entire tree doesnt have to be searched for earlier observations.
+        """
+        assert self._is_fit, "Tree must be fit before updating"
+
+        # function to force down extremely low probabilities
+        def round_down(num):
+            return num * (num > 9.9999999999e-14)
 
         def get_nodes(obs_key,obs_time,root):
+            """
+            Identifies nodes to evaluate with Bayes theorem. The idea is that we need a collection of nodes whose frequencies sum to one
+            ---
+            Inputs:
+            obs_key: Observation key is a tuple of unit_type_id and unit type count
+            obs_time: Time is an integer representing seconds elapsed in the game.
+            root: parent node to begin search from (this will change during recursion)
+            """
+            # if parent doesnt have any children, then we'll need it to keep our freqs summing to 1
             if len(root.children) == 0:
                 zero_list.append(root)
 
             for node in root.children:
-                if node.freq <= 0:
+                if node.freq <= 0: # we dont care about things that cant happen
                     continue
-                if node.key == obs_key:
-                    bayes_list.append(node)
+                if node.key == obs_key: # these nodes are eligible for bayes since they contain the correct observation
+                    bayes_list.append(node) 
                     continue
-                if (node.mean - prune_sd * node.std) > obs_time:
+                if (node.mean - prune_sd * node.std) > obs_time: #heurisitic to stop wasteful recursion 
                     zero_list.append(node)
                     continue
 
-                get_nodes(obs_key,obs_time,node)
+                get_nodes(obs_key,obs_time,node) # if there are remaining children, we need to keep looking down branch paths
             return
 
         def update_parents(delta,node):
-            node.freq = node.freq + delta
+            # add change in probability to all nodes "upstream" of evaluated node
+            node.freq = round_down(max([node.freq + delta,0])) 
             if node.parent:
                 return update_parents(delta,node.parent)
             else:
                 return
 
         def update_children(old_freq,new_freq,node):
+            # children frequencies should maintain the same ratio to the evaluated parent frequency 
             children = node.children
-            if len(children) == 0:
-                return
-            for node in node.children:
-                node.freq = node.freq / old_freq * new_freq
-                update_children(old_freq,new_freq,node)
+            for child in children:
+                if node.freq <= 0:
+                    child.freq = 0
+                else:
+                    child.freq = round_down(min([child.freq / old_freq * new_freq,node.freq]))
+                update_children(old_freq,new_freq,child)
             return
+
+        def calc_cdf(x,mu,sigma):
+            # sigma is 0 for starter units since we always instantly have them - this breaks the norm.cdf function
+            if sigma == 0:
+                return 1 *(x>=mu)
+            else:
+                return norm.cdf(x, mu, sigma)
     
         bayes_list = []
         zero_list = []
         
-        get_nodes(obs[0],obs[1],self.write_root)
+        get_nodes(obs[0],obs[1],self.root)
         
-        #Freq Check
+        # Freq Check: This should always be very,very close to 1 since the idea is we are grabbing a full range of possibilities at 
+        # different timings / build sequence depths
+        
+        # We end up ratio-ing by this freq to make sure that rounding errors dont compund into larger errors over multiple updates
         freq = 0
         for node in bayes_list:
             freq += node.freq
@@ -171,7 +208,7 @@ class tree():
             freq += node.freq
         print(f'Freq Check: {freq}')
         
-        bayes_list_cdf = [norm.cdf(obs[1], node.mean, node.std) for node in bayes_list]
+        bayes_list_cdf = [calc_cdf(obs[1], node.mean, node.std) for node in bayes_list]
         zero_list_cdf = [0 for _ in zero_list]
         
         all_nodes = bayes_list + zero_list
@@ -184,33 +221,53 @@ class tree():
             val = node.freq * all_cdfs[index]
             numer.append(val)
             denom += val
+
+        if denom <= 0: #this occurs when we are predicting on a build not in our data set. We will just ignore obs that break our model
+            return None
             
         node_prob = []
-        for num in numer:
-            node_prob.append(num/denom)
+        likelihoods = []
+        for index,num in enumerate(numer):
+            node_num = num/denom * (1/freq)
+            node_num = max([0,node_num])
+            node_prob.append(node_num)
+            likelihoods.append(num/denom/all_nodes[index].freq) 
             
         for index,node in enumerate(all_nodes):
-            old = node.freq
-            new = node_prob[index]
-            update_parents(new-old,node)
+            old = float(node.freq)
+            new = float(node_prob[index])
+            update_parents(new-old,node.parent)
+            node.freq = round_down(new)
             update_children(old,new,node)
-            
-        
-        return
+        return likelihoods #You could make a SSE-like metric with this to assess observation importance 
 
-    def predict(self,time,attribute='key',read_root=False):
-        assert self._is_copied, "Tree must be copied before prediction"
+    def predict(self,time,attribute='key'):
+        """
+        Returns the attributes of a list of nodes occuring after a specified time with the respective node frequencies. 
+        This allows for predicting attributes such as next build order step or strategy cluster.
+        ---
+        Inputs:
+        time: Integer in seconds that represents elapsed game time
+        attribute: String represent name of attribute to return predictions for 
+        """
+        assert self._is_fit, "Tree must be fit before prediction"
 
-        predict_parents = []
-        predict_children = []
+        predict_list = []
 
         def get_nodes(time,root):
             if root.mean >= time:
-                predict_parents.append(root)
-                predict_children.append(list(root.children))
+                predict_list.append(root)
                 return 
 
-            for node in root.children:
+            children = root.children
+
+            # if there are no more children, just return the latest node
+            # not a great assumption, but keeps frequencies adding to 1
+            if len(children) == 0:
+                predict_list.append(root)
+                return
+
+            for node in children:
                 if node.freq <= 0:
                     continue
 
@@ -218,52 +275,58 @@ class tree():
 
             return
 
-        if read_root:
-            get_nodes(time,self.read_root)
-        else:
-            get_nodes(time,self.write_root)
+        get_nodes(time,self.root)
 
         weighted_predictions = []
 
-        for index,parent in enumerate(predict_parents):
-            child_freq = norm.cdf(time,parent.mean,parent.std)
-            parent_freq = 1 - child_freq
-            weighted_predictions.append((getattr(parent,attribute), parent_freq * parent.freq ))
-            for child in predict_children[index]:
-                weighted_predictions.append((getattr(child,attribute), child_freq * child.freq ))
+        for node in predict_list:
+            weighted_predictions.append((getattr(node,attribute), node.freq ))
 
         return weighted_predictions
 
-    def export_json(self,fp=None,read_tree=False):
+    def export_json(self,fp=None,root_cluster=13):
+        """
+        Exports tree as a JSON dictionary to an optional file path, otherwise returns as a string. Designed for Vega plotting.
+        ---
+        Inputs:
+        fp: File path to save JSON file to
+        big: Bool. True means that the entire tree will be exported. False means the tree up until no more splits will be exported.
+        """
         node_list = []
         next_id = 0
-        
-        def node_linker(root_node,parent_id=None):
+
+        def node_linker(root_node,parent_id=None,force_add=False,big=False):
             nonlocal next_id
-            id_num = next_id
-            next_id += 1
+            force_flag = False
             if parent_id is not None:
-                node_list.append({
-                    "id": id_num,
-                    "name": root_node.name,
-                    "parent": parent_id,
-                    "freq": root_node.freq
-                })
+                id_num = parent_id
+                if len(root_node.children) > 1 or big:
+                    force_flag = True
+                if len(root_node.children) > 1 or force_add or big:
+                    id_num = next_id
+                    next_id += 1
+                    node_list.append({
+                        "id": id_num,
+                        "name": root_node.name,
+                        "parent": parent_id,
+                        "freq": root_node.freq,
+                        'cluster' : int(max(root_node.cluster, key=root_node.cluster.get))  #returns most frequent cluster for each node
+                    })
             else:
+                id_num = next_id
+                next_id += 1
                 node_list.append({
                     "id": id_num,
                     "name": 'root',
-                    "freq": root_node.freq
+                    "freq": root_node.freq,
+                    'cluster' : root_cluster
                 })
             for child in root_node.children:
-                node_linker(child,id_num)
+                node_linker(child,id_num,force_add=force_flag)
             return
-        
-        if read_tree:
-            node_linker(self.read_root)
-        else:
-            node_linker(self.write_root)
-        
+
+        node_linker(self.root)
+
         if fp:
             with open(fp, 'w') as fout:
                 json.dump(node_list, fout)
