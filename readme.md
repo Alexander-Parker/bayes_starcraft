@@ -4,7 +4,7 @@ This project attempts to predict an opponent’s strategy in StarCraft using rea
 
 Games, especially complicated games such as StarCraft where prior game states have a large impact on current and future game states (the choices I make at the start of the game decide what I can do later in the game), are often tackled using deep learning techniques such as RNN or LSTM neural networks. I believe the model described below is powerful because it is able to make predictions about highly complicated games such as StarCraft in a manner similar to neural networks while preserving a high degree of interpretability expected of Bayesian models.
 
-I’ve divided up this discussion of the model into a brief primer on StarCraft; a description of the actual model and its implementation found in bayes_tree.py; a walkthrough of replay dataset and how strategies were determined; and analysis of an actual prediction from the model. The primer may be helpful to those familiar with StarCraft as it addresses core assumptions the model makes about a StarCraft game.
+I’ve divided up this discussion of the model into a brief primer on StarCraft; a description of the actual model and its implementation found in ```bayes_tree.py```; a walkthrough of replay dataset and how strategies were determined; and analysis of an actual prediction from the model. The primer may be helpful to those familiar with StarCraft as it addresses core assumptions the model makes about a StarCraft game.
 
 ## A Quick Overview of StarCraft
 
@@ -22,11 +22,11 @@ As a side note, StarCraft has three factions that players choose before starting
 
 I designed a custom model to approach this challenge. The model memorizes build orders from game replays and represents them as a tree data structure. Build orders will overlap from the root of the tree (since all games start out the same) and form branches as nodes in each build order begin to differ from one another. The diagram below represents a simplified tree of only 4 build orders. All 4 build orders share the first 2 nodes and begin branching from there.
 
-INSERT DIAGRAM HERE
+![Tree Diagram](https://raw.githubusercontent.com/Alexander-Parker/bayes_starcraft/master/readme_assets/tree_diagram.png)
 
 This structure is useful because it allows us to evaluate multiple build orders by looking at a smaller number of relevant nodes. The model also collects important information about each node such as the timing of the node. Each node contains the time at which every relevant build order completed that node in its respective game replay. We need to collect these timings because we will not likely not be able to determine our opponents actual build order in-game; we’ll instead see that he has completed certain combinations of buildings and units by certain times as we scout out his base. Each node also has a frequency associated with it. The sum of child node frequencies must sum to the frequency of the parent with the ultimate root node having a frequency of 1. The idea here is that the frequency initially represents how often we saw a node get “used” in our memorized replays. For example, the root node always gets used since each game starts out the same while a node at the end of the tree likely occurred in only one replay and has an extremely small frequency.
 
-The model is implemented as the tree class in bayes_tree.py and has three primary tasks:
+The model is implemented as the tree class in ```bayes_tree.py``` and has three primary tasks:
 * Memorize game replays to construct a tree of nodes representing all memorized build orders with corresponding frequencies and timings
 * Update node frequencies based on observations in a new game we are trying to make a prediction about (discussed in detail below)
 * Make a prediction. This is actually done by collecting all nodes that occur (on average) after some time and extracting a desired node attribute such as the decision each node represents or strategy (more on this later), weighted by the respective node’s frequency
@@ -35,17 +35,17 @@ The class and its methods are well commented, but I will discuss the observation
 
 The model “looks” for these nodes by starting at the root and looking down every branch, recursing as we get more and more branches. Not every branch is going to have the node we are looking for – not every strategy involves building two barracks – so we also specify a time cutoff. If the mean timing of a node is much greater than the time of my observation, I give up my search and count the node as one of my relevant nodes. Thanks to recursing at every new child node and the previously-mentioned rule that sum of all children frequencies must equal the parent, the sum of my relevant node frequencies should also be 1. This is critical because I am using these nodes to represent all possible game outcomes in the context of a particular observation. 
 
-The diagram below shows how we update the frequency for a particular node using Bayes Theorem once we have all of our relevant nodes. At each node we have a collection of memorized timings which we calculate a mean and standard deviation from. This allows us to construct a cumulative distribution function which represents the probability that the node will be completed at certain times, assuming the node is completed at all. We plug our actual timing into this CDF to get P(Obs. | Node). This is divided by P(Obs. | All Nodes) which represents the sum of the prior calculation applied to all relevant nodes. This ratio is our likelihood (and the interpretable element of our model) which is then multiplied by our prior node frequency to get an updated frequency which incorporates the information from the observation.
+The diagram below shows how we update the frequency for a particular node using Bayes Theorem once we have all of our relevant nodes. At each node we have a collection of memorized timings which we calculate a mean and standard deviation from. This allows us to construct a cumulative distribution function which represents the probability that the node will be completed at certain times, assuming the node is completed at all. We plug our actual timing into this CDF to get _P(Obs. | Node)_. This is divided by _P(Obs. | All Nodes)_ which represents the sum of the prior calculation applied to all relevant nodes. This ratio is our likelihood (and the interpretable element of our model) which is then multiplied by our prior node frequency to get an updated frequency which incorporates the information from the observation.
 
-Please note that for the nodes collected due to a timing cutoff, we assume P(Obs. | Node) = 0 as the cutoff implies that we would be approaching the left limit of whatever CDF function we might eventually construct for some children of these nodes where P(Obs. | Node) is approximately 0. 
+Please note that for the nodes collected due to a timing cutoff, we assume _P(Obs. | Node) = 0_ as the cutoff implies that we would be approaching the left limit of whatever CDF function we might eventually construct for some children of these nodes where _P(Obs. | Node)_ is approximately 0. 
 
-INSERT BAYES DIAGRAM HERE
+![Bayes Diagram](https://raw.githubusercontent.com/Alexander-Parker/bayes_starcraft/master/readme_assets/bayes_tree_diagram.png)
 
 ## The StarCraft Dataset
 
 I used Glen Robertson’s and Ian Watson’s dataset described [here](https://www.cs.auckland.ac.nz/research/gameai/publications/Robertson_Watson_FLAIRS14.pdf) for my analysis. The researchers extracted game information on a frame-by-frame basis into a series of MySQL databases. The figure below, generated by Robertson and Watson, describes the structure of these databases.
 
-INSERT STRUCTURE DIAGRAM HERE
+![Database Structure](https://raw.githubusercontent.com/Alexander-Parker/bayes_starcraft/master/readme_assets/database_structure.png)
 
 Build order information was extracted from the attributechange table as one of the attributes was whether a unit existed or not. The time of each new unit existing for the first time and the unit type were recorded to construct a full build order. The visibilitychange table was used to generate real, in-game observations for each player by recording all observations of a player by his opponent. 
 
@@ -59,7 +59,7 @@ These unit counts were then scaled by the in-game resource cost of each unit typ
 
 Clustering was done using a hierarchical agglomerative clustering model with ward linkages which resulted in 7 Terran strategy clusters and 6 Protoss strategy clusters. I used a dendrogram to help determine distance cutoffs. The Terran dendrogram is included as reference below.
 
-INSERT DENDROGRAM HERE
+![Dendrogram](https://raw.githubusercontent.com/Alexander-Parker/bayes_starcraft/master/readme_assets/dendrogram.png)
 
 ## Making Predictions for a New Game
 
@@ -71,7 +71,7 @@ The diagram below ticks through several observations for an unmemorized game. Pl
 
 You’ll see that nodes closer to the center are opaquer and are all one strategy as this is the main strategy seen in replays. Nodes close to the center are all more likely because a smaller number of choices must be made to reach them relative to those on the outer edge.
 
-INSERT GIF HERE
+![Animated Tree](https://raw.githubusercontent.com/Alexander-Parker/bayes_starcraft/master/readme_assets/animated_tree.gif)
 
 The start of the animation shows the full memorized tree where frequencies reflect historical replays rather than any view of the current game. As the first observation is incorporated into the model, half of the nodes are set to a frequency of 0. This is due to the tree being trained for both the Protoss and Terran factions. The observation confirms that we are dealing with a Terran rather than a Protoss player.
 
