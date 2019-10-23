@@ -284,7 +284,7 @@ class tree():
 
         return weighted_predictions
 
-    def export_json(self,fp=None,root_cluster=13):
+    def export_json(self,fp=None,root_cluster=13,big=False):
         """
         Exports tree as a JSON dictionary to an optional file path, otherwise returns as a string. Designed for Vega plotting.
         ---
@@ -295,7 +295,7 @@ class tree():
         node_list = []
         next_id = 0
 
-        def node_linker(root_node,parent_id=None,force_add=False,big=False):
+        def node_linker(root_node,parent_id=None,force_add=False,big=big):
             nonlocal next_id
             force_flag = False
             if parent_id is not None:
